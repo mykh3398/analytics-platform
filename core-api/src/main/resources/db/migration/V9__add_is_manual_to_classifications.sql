@@ -1,0 +1,1 @@
+ALTER TABLE classifications ADD COLUMN is_manual BOOLEAN NOT NULL DEFAULT FALSE;
