@@ -25,6 +25,7 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final ApiKeyAuthFilter apiKeyAuthFilter; // ДОДАНО: Інжектуємо наш новий фільтр
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -40,10 +41,13 @@ public class SecurityConfig {
                                 "/api/internal/**",
                                 "/webhook/**"
                         ).permitAll()
+                        // ДОДАНО: Явно вказуємо, що Зовнішнє API вимагає авторизації
+                        .requestMatchers("/api/external/**").authenticated()
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(jwtAuthFilter,
-                        UsernamePasswordAuthenticationFilter.class);
+                // ДОДАНО: Вставляємо фільтр API-ключів у ланцюжок ПЕРЕД стандартними перевірками
+                .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
