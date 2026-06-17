@@ -1,0 +1,210 @@
+services:
+
+  # ── Інфраструктура ───────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16
+    container_name: analytics-postgres
+    environment:
+      POSTGRES_DB: analytics_db
+      POSTGRES_USER: "${DB_USER:-postgres}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-postgres}"
+      PGTZ: UTC
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: analytics-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RMQ_USER:-guest}"
+      RABBITMQ_DEFAULT_PASS: "${RMQ_PASSWORD:-guest}"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  minio:
+    image: minio/minio:latest
+    container_name: analytics-minio
+    environment:
+      MINIO_ROOT_USER: "${MINIO_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD:-minioadmin}"
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API порт
+      - "9001:9001" # Web UI порт
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── NLP ──────────────────────────────────────────────────────────────────────
+
+  nlp-service:
+      build: ./nlp-service
+      container_name: analytics-nlp
+      ports:
+        - "${NLP_PORT:-8000}:8000"
+      env_file:
+        - .env  
+      environment:
+        - MODEL_NAME=${NLP_MODEL_NAME:-joeddav/xlm-roberta-large-xnli}
+        - DEVICE=${NLP_DEVICE:-cpu}
+        - "HYPOTHESIS_TEMPLATE=${NLP_HYPOTHESIS_TEMPLATE:-Це повідомлення стосується теми: {}}"
+        - MAX_LENGTH=${NLP_MAX_LENGTH:-512}
+        - HF_HOME=${NLP_HF_HOME:-/app/models_cache}
+        - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+        - MINIO_ACCESS_KEY=${MINIO_USER:-minioadmin}
+        - MINIO_SECRET_KEY=${MINIO_PASSWORD:-minioadmin}
+        - MINIO_SECURE=${MINIO_SECURE:-false}
+        - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-nlp-indexes}
+      volumes:
+        - "hf_cache:${NLP_HF_HOME:-/app/models_cache}"
+      depends_on:
+        minio:
+          condition: service_healthy 
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+        interval: 15s
+        timeout: 10s
+        retries: 5
+        start_period: 180s
+      restart: on-failure
+
+  # ── Spring Boot Core API ─────────────────────────────────────────────────────
+  
+  core-api:
+      build: ./core-api
+      container_name: analytics-core
+      ports:
+        - "8080:8080"
+      env_file:
+        - .env
+      environment:
+        SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/analytics_db?options=-c%20TimeZone%3DUTC"
+        SPRING_DATASOURCE_USERNAME: "${DB_USER:-postgres}"
+        SPRING_DATASOURCE_PASSWORD: "${DB_PASSWORD:-postgres}"
+        SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+        SPRING_RABBITMQ_HOST: rabbitmq
+        SPRING_RABBITMQ_PORT: 5672
+        SPRING_RABBITMQ_USERNAME: "${RMQ_USER:-guest}"
+        SPRING_RABBITMQ_PASSWORD: "${RMQ_PASSWORD:-guest}"
+        NLP_SERVICE_URL: "http://nlp-service:8000"
+        SPRING_FLYWAY_VALIDATE_ON_MIGRATE: false
+        JWT_SECRET: "${JWT_SECRET}"
+        JWT_EXPIRATION: 86400000        
+        INTERNAL_API_KEY: "${INTERNAL_API_KEY}"
+        APP_FRONTEND_URL: "${FRONTEND_URL:-http://localhost:5173}"
+        SPRING_MAIL_HOST: "smtp.gmail.com"
+        SPRING_MAIL_PORT: "587"
+        SPRING_MAIL_USERNAME: "${MAIL_USERNAME}"
+        SPRING_MAIL_PASSWORD: "${MAIL_PASSWORD}"
+        SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH: "true"
+        SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE: "true"
+      depends_on:
+        postgres:
+          condition: service_healthy
+        rabbitmq:
+          condition: service_healthy
+        nlp-service:                   
+          condition: service_healthy   
+      healthcheck:
+        test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 6
+        start_period: 30s
+      restart: on-failure
+
+  # ── Колектори ────────────────────────────────────────────────────────────────
+
+  analytics-tg-collector:
+    build: ./collectors/telegram-collector
+    container_name: analytics-tg-collector
+    env_file:
+      - ./collectors/telegram-collector/.env
+    environment:
+      RABBITMQ_URL: "amqp://${RMQ_USER:-guest}:${RMQ_PASSWORD:-guest}@rabbitmq:5672"
+      BACKEND_URL: "http://core-api:8080"
+      INTERNAL_API_KEY: "${INTERNAL_API_KEY}"
+      MODE: "polling"
+    ports:
+      - "8001:8001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      core-api:
+        condition: service_healthy 
+    restart: on-failure
+
+  analytics-meta-collector: 
+    build: ./collectors/meta-collector
+    container_name: analytics-meta-collector 
+    env_file:
+      - ./collectors/meta-collector/.env
+    environment:
+      RABBITMQ_URL: "amqp://${RMQ_USER:-guest}:${RMQ_PASSWORD:-guest}@rabbitmq:5672"
+      BACKEND_URL: "http://core-api:8080"
+      INTERNAL_API_KEY: "${INTERNAL_API_KEY}"
+    ports:
+      - "8003:8000"
+      - "8002:8002"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      core-api:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: analytics-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      core-api:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Ngrok (Тунель для вебхуків Meta) ─────────────────────────────────────────
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: analytics-ngrok
+    restart: on-failure
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command:
+      - "http"
+      - "--domain=${NGROK_DOMAIN}" 
+      - "analytics-meta-collector:8000"
+    ports:
+      - "4040:4040"
+    depends_on:
+      - analytics-meta-collector
+
+volumes:
+  pgdata:
+  hf_cache:
+  minio_data:
