@@ -1,0 +1,15 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.7.4
+pydantic-settings==2.3.0
+transformers==4.44.2
+sentencepiece==0.2.0
+protobuf==5.28.0
+sentence-transformers==3.1.1
+torch==2.3.1+cpu
+spacy==3.7.5
+https://github.com/explosion/spacy-models/releases/download/xx_ent_wiki_sm-3.7.0/xx_ent_wiki_sm-3.7.0.tar.gz
+scikit-learn==1.5.2
+numpy==1.26.4
+minio==7.2.5
+cachetools==5.3.3
